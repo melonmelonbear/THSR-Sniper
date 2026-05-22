@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -186,7 +187,7 @@ async def health_check():
     try:
         # Test database connection
         db = next(get_database())
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         return {"status": "healthy", "service": "thsr-sniper-auth", "database": "connected"}
     except Exception as e:
         return {"status": "unhealthy", "service": "thsr-sniper-auth", "error": str(e)}
