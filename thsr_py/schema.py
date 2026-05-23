@@ -1,6 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
+import re
 
 STATION_MAP = [
     "Nangang",
@@ -121,17 +122,107 @@ def parse_time_string(time_str: str) -> Optional[datetime]:
     return None
 
 
-def find_closest_train_within_range(trains: List[Dict[str, str]], target_time_idx: int, tolerance_hours: float = 0.5) -> Optional[Dict[str, str]]:
+TimePreference = Union[int, str]
+
+
+def get_time_preference_datetime(time_preference: TimePreference) -> Optional[datetime]:
+    """Convert a legacy time slot ID or HH:MM value into a comparable datetime."""
+    if isinstance(time_preference, int):
+        if time_preference < 1 or time_preference > len(TIME_TABLE):
+            return None
+        return _parse_time_table_to_datetime(TIME_TABLE[time_preference - 1])
+
+    if isinstance(time_preference, str):
+        value = time_preference.strip()
+        if not value:
+            return None
+        if value.isdigit():
+            return get_time_preference_datetime(int(value))
+        return parse_time_string(value)
+
+    return None
+
+
+def is_valid_time_preference(time_preference: TimePreference) -> bool:
+    """Validate legacy time slot IDs and minute-level HH:MM values."""
+    return get_time_preference_datetime(time_preference) is not None
+
+
+def format_time_preference_for_form(time_preference: TimePreference) -> Optional[str]:
+    """Convert a time preference to the value expected by the THSR booking form."""
+    if isinstance(time_preference, int):
+        if 1 <= time_preference <= len(TIME_TABLE):
+            return TIME_TABLE[time_preference - 1]
+        return None
+
+    if isinstance(time_preference, str):
+        value = time_preference.strip()
+        if not value:
+            return None
+        if value.isdigit():
+            return format_time_preference_for_form(int(value))
+        parsed = parse_time_string(value)
+        if parsed:
+            return _get_time_table_option_at_or_before(parsed)
+
+    return None
+
+
+def _get_time_table_option_at_or_before(target_time: datetime) -> str:
+    """Return the nearest official THSR query time option at or before the target."""
+    parsed_options = []
+    for option in TIME_TABLE:
+        parsed = _parse_time_table_to_datetime(option)
+        if parsed:
+            parsed_options.append((parsed, option))
+
+    earlier_options = [
+        (parsed, option)
+        for parsed, option in parsed_options
+        if parsed.time() <= target_time.time()
+    ]
+    if earlier_options:
+        return max(earlier_options, key=lambda item: item[0].time())[1]
+
+    return parsed_options[0][1]
+
+
+def parse_travel_minutes(travel_time: str) -> Optional[int]:
+    """Parse THSR travel duration strings into minutes."""
+    if not travel_time:
+        return None
+
+    value = travel_time.strip()
+    if ":" in value:
+        try:
+            hours, minutes = value.split(":", 1)
+            return int(hours) * 60 + int(minutes)
+        except ValueError:
+            return None
+
+    hour_match = re.search(r"(\d+)\s*(?:小時|時|h)", value, re.IGNORECASE)
+    minute_match = re.search(r"(\d+)\s*(?:分鐘|分|m)", value, re.IGNORECASE)
+    if hour_match or minute_match:
+        hours = int(hour_match.group(1)) if hour_match else 0
+        minutes = int(minute_match.group(1)) if minute_match else 0
+        return hours * 60 + minutes
+
+    if value.isdigit():
+        return int(value)
+
+    return None
+
+
+def find_closest_train_within_range(trains: List[Dict[str, str]], target_time: TimePreference, tolerance_hours: float = 0.5) -> Optional[Dict[str, str]]:
     """
     Find the closest train within ±tolerance_hours of the target time.
-    Returns the train closest to the target time, or None if no trains are within range.
+    Returns the shortest travel-time train, using departure closeness as a tie-breaker.
     """
-    if not trains or target_time_idx < 1 or target_time_idx > len(TIME_TABLE):
+    if not trains:
         return None
     
-    target_time_str = TIME_TABLE[target_time_idx - 1]
-    target_time = _parse_time_table_to_datetime(target_time_str)
-    if not target_time:
+    target_datetime = get_time_preference_datetime(target_time)
+    if not target_datetime:
         return None
     
     valid_trains = []
@@ -145,17 +236,21 @@ def find_closest_train_within_range(trains: List[Dict[str, str]], target_time_id
         if not train_time:
             continue
         
-        # Calculate time difference in hours
-        time_diff = abs((train_time - target_time).total_seconds()) / 3600
+        time_diff_minutes = abs((train_time - target_datetime).total_seconds()) / 60
         
-        if time_diff <= tolerance_hours:
-            valid_trains.append((train, time_diff))
+        if time_diff_minutes <= tolerance_hours * 60:
+            travel_minutes = parse_travel_minutes(train.get("travel_time", ""))
+            valid_trains.append((
+                train,
+                time_diff_minutes,
+                travel_minutes if travel_minutes is not None else float("inf"),
+                train_time.time(),
+            ))
     
     if not valid_trains:
         return None
     
-    # Return the train with the smallest time difference
-    valid_trains.sort(key=lambda x: x[1])
+    valid_trains.sort(key=lambda x: (x[2], x[1], x[3]))
     return valid_trains[0][0]
 
 

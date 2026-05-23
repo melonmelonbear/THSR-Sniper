@@ -38,17 +38,25 @@ const cleanPNR = (pnr: string | null | undefined): string => {
 };
 
 // Helper function to format departure time
-const formatDepartureTime = (timeIndex: number | undefined, timeSlots: any[]): string => {
-  if (!timeIndex || !timeSlots || timeSlots.length === 0) {
+const formatDepartureTime = (timeValue: number | string | undefined, timeSlots: any[]): string => {
+  if (!timeValue) {
     return '不指定時間';
   }
+
+  if (typeof timeValue === 'string') {
+    return timeValue;
+  }
+
+  if (!timeSlots || timeSlots.length === 0) {
+    return `時間索引 ${timeValue}`;
+  }
   
-  const timeSlot = timeSlots.find(slot => slot.id === timeIndex);
+  const timeSlot = timeSlots.find(slot => slot.id === timeValue);
   if (timeSlot) {
     return `${timeSlot.formatted_time} (${timeSlot.time})`;
   }
   
-  return `時間索引 ${timeIndex}`;
+  return `時間索引 ${timeValue}`;
 };
 
 const TasksPage: React.FC = () => {

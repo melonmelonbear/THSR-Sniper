@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 import logging
 import threading
 import json
@@ -14,7 +14,7 @@ import fcntl
 import os
 
 from .flows import run as run_booking_flow
-from .schema import STATION_MAP, TIME_TABLE, TicketType, is_ticket_sales_open, get_taiwan_now
+from .schema import STATION_MAP, TIME_TABLE, TicketType, is_ticket_sales_open, get_taiwan_now, is_valid_time_preference
 
 
 class BookingStatus(Enum):
@@ -40,7 +40,7 @@ class BookingTask:
     child_cnt: Optional[int] = None
     senior_cnt: Optional[int] = None
     disabled_cnt: Optional[int] = None
-    time: Optional[int] = None
+    time: Optional[Union[int, str]] = None
     train_index: Optional[int] = None
     seat_prefer: Optional[int] = None
     class_type: Optional[int] = None
@@ -369,6 +369,8 @@ class BookingScheduler:
     
     def add_task(self, task: BookingTask) -> str:
         """Add a new booking task."""
+        self._load_tasks(force=True)
+
         if not task.id:
             task.id = str(uuid.uuid4())
         
@@ -381,14 +383,14 @@ class BookingScheduler:
         """Get a specific task by ID."""
         # Only reload if we don't have the task in memory
         if task_id not in self.tasks:
-            self._load_tasks()
+            self._load_tasks(force=True)
         return self.tasks.get(task_id)
     
     def list_tasks(self, force_reload: bool = False, include_deleted: bool = False) -> List[BookingTask]:
         """List all tasks, optionally excluding deleted tasks."""
-        # Only reload if we have no tasks in memory, to avoid overwriting
-        if not self.tasks or force_reload:
-            self._load_tasks()
+        should_reload = force_reload or not self.tasks or self._should_reload_tasks()
+        if should_reload:
+            self._load_tasks(force=True)
         
         tasks = list(self.tasks.values())
         
@@ -401,7 +403,7 @@ class BookingScheduler:
     def cancel_task(self, task_id: str, user_id: Optional[str] = None) -> bool:
         """Cancel a specific task."""
         # Reload to get latest state
-        self._load_tasks()
+        self._load_tasks(force=True)
         if task_id in self.tasks:
             task = self.tasks[task_id]
             
@@ -419,7 +421,7 @@ class BookingScheduler:
     def remove_task(self, task_id: str, user_id: Optional[str] = None) -> bool:
         """Mark a task as deleted instead of removing it completely."""
         # Reload to get latest state
-        self._load_tasks()
+        self._load_tasks(force=True)
         if task_id in self.tasks:
             task = self.tasks[task_id]
             
@@ -465,6 +467,7 @@ class BookingScheduler:
     
     def _process_tasks(self) -> None:
         """Process all pending tasks."""
+        self._load_tasks()
         current_time = datetime.now(timezone.utc)
         
         for task in list(self.tasks.values()):
@@ -643,6 +646,7 @@ class BookingScheduler:
                         break
                 
                 task.status = BookingStatus.SUCCESS
+                task.error_message = None
                 self.logger.info(f"Task {task.id} completed successfully! PNR: {task.success_pnr}")
                 self.logger.info(f"Task {task.id} STATUS SET TO SUCCESS - about to save...")
             else:
@@ -729,7 +733,7 @@ def create_booking_task(
     child_cnt: Optional[int] = None,
     senior_cnt: Optional[int] = None,
     disabled_cnt: Optional[int] = None,
-    time: Optional[int] = None,
+    time: Optional[Union[int, str]] = None,
     train_index: Optional[int] = None,
     seat_prefer: Optional[int] = None,
     class_type: Optional[int] = None,
@@ -785,8 +789,8 @@ def create_booking_task(
         raise ValueError(f"Disabled ticket count must be 0-10: {disabled_cnt}")
     
     # Validate optional parameters
-    if time is not None and not 1 <= time <= len(TIME_TABLE):
-        raise ValueError(f"Invalid time slot: {time} (must be 1-{len(TIME_TABLE)})")
+    if time is not None and not is_valid_time_preference(time):
+        raise ValueError(f"Invalid time: {time} (must be a slot ID 1-{len(TIME_TABLE)} or HH:MM)")
     
     if train_index is not None and train_index < 1:
         raise ValueError(f"Invalid train index: {train_index} (must be >= 1)")

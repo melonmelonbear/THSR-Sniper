@@ -37,17 +37,31 @@ const VersionChecker: React.FC<VersionCheckerProps> = ({ onUpdateDetected }) => 
             });
           }
           
-          // Clear localStorage except essential data
+          // Clear localStorage except essential data and the current auth session.
           const essentialData = {
-            build_time: currentBuildTime
+            build_time: currentBuildTime,
+            auth_storage: localStorage.getItem('auth-storage'),
+            auth_token: localStorage.getItem('auth_token'),
+            refresh_token: localStorage.getItem('refresh_token'),
+            notification_history: localStorage.getItem('notificationHistory')
           };
           
           localStorage.clear();
           
           // Restore essential data
-          Object.entries(essentialData).forEach(([key, value]) => {
-            localStorage.setItem(key, value);
-          });
+          localStorage.setItem('build_time', essentialData.build_time);
+          if (essentialData.auth_storage) {
+            localStorage.setItem('auth-storage', essentialData.auth_storage);
+          }
+          if (essentialData.auth_token) {
+            localStorage.setItem('auth_token', essentialData.auth_token);
+          }
+          if (essentialData.refresh_token) {
+            localStorage.setItem('refresh_token', essentialData.refresh_token);
+          }
+          if (essentialData.notification_history) {
+            localStorage.setItem('notificationHistory', essentialData.notification_history);
+          }
           
           // Force reload
           window.location.reload();

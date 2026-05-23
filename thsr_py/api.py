@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import requests
+import os
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +14,7 @@ from .scheduler import (
     BookingTask, BookingStatus, 
     get_scheduler, create_booking_task
 )
-from .schema import STATION_MAP, TIME_TABLE
+from .schema import STATION_MAP, TIME_TABLE, is_valid_time_preference
 from .flows import run as run_booking_flow
 
 # Utility function to clean ANSI color codes
@@ -68,7 +69,7 @@ class BookingRequest(BaseModel):
     child_cnt: Optional[int] = Field(None, ge=0, le=10, description="Number of child tickets (0-10)")
     senior_cnt: Optional[int] = Field(None, ge=0, le=10, description="Number of senior tickets (0-10)")
     disabled_cnt: Optional[int] = Field(None, ge=0, le=10, description="Number of disabled tickets (0-10)")
-    time: Optional[int] = Field(None, ge=1, le=38, description="Departure time ID (1-38)")
+    time: Optional[Union[int, str]] = Field(None, description="Departure time slot ID (1-38) or HH:MM time")
     train_index: Optional[int] = Field(None, ge=1, description="Train selection index")
     seat_prefer: Optional[int] = Field(None, ge=0, le=2, description="Seat preference: 0=any, 1=window, 2=aisle")
     class_type: Optional[int] = Field(None, ge=0, le=1, description="Class type: 0=standard, 1=business")
@@ -91,6 +92,14 @@ class BookingRequest(BaseModel):
         v = v.strip().upper()
         if len(v) != 10:
             raise ValueError("Personal ID must be 10 characters long")
+        return v
+
+    @validator('time')
+    def validate_time(cls, v):
+        if v is None:
+            return v
+        if not is_valid_time_preference(v):
+            raise ValueError("Time must be a slot ID (1-38) or HH:MM")
         return v
     
     @model_validator(mode='after')
@@ -136,7 +145,7 @@ class TaskStatusResponse(BaseModel):
     child_cnt: Optional[int] = None
     senior_cnt: Optional[int] = None
     disabled_cnt: Optional[int] = None
-    time: Optional[int] = None
+    time: Optional[Union[int, str]] = None
     train_index: Optional[int] = None
     interval_minutes: int
     attempts: int
@@ -176,16 +185,23 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize scheduler on startup."""
-    scheduler = get_scheduler()
-    scheduler.start_scheduler()
+    """Initialize task storage on startup.
+
+    The standalone scheduler service owns booking execution. Keeping the API
+    scheduler stopped avoids two containers writing the same task file.
+    """
+    get_scheduler()
+    if os.environ.get("THSR_API_MODE") != "1":
+        scheduler = get_scheduler()
+        scheduler.start_scheduler()
 
 
 @app.on_event("shutdown") 
 async def shutdown_event():
     """Stop scheduler on shutdown."""
     scheduler = get_scheduler()
-    scheduler.stop_scheduler()
+    if scheduler.running:
+        scheduler.stop_scheduler()
 
 
 @app.get("/", response_model=Dict[str, str])

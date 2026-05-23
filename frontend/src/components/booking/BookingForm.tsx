@@ -316,18 +316,22 @@ const BookingForm: React.FC<BookingFormProps> = ({ stations, timeSlots, thsrInfo
           {/* Departure Time */}
           <div className="form-group">
             <label htmlFor="departureTime" className="form-label">出發時間（選填）</label>
-            <select
+            <input
               {...register('departureTime')}
+              type="time"
               id="departureTime"
-              className="rog-select"
-            >
-              <option value="">不指定時間</option>
+              step="60"
+              list="departure-time-suggestions"
+              className="rog-input"
+            />
+            <datalist id="departure-time-suggestions">
               {timeSlots.map((slot) => (
-                <option key={slot.id} value={slot.id}>
-                  {slot.formatted_time} ({slot.time})
-                </option>
+                <option key={slot.id} value={slot.formatted_time} />
               ))}
-            </select>
+            </datalist>
+            <p className="text-text-muted text-xs mt-1">
+              可精準到分鐘；留空則不指定時間。
+            </p>
           </div>
         </div>
       </div>

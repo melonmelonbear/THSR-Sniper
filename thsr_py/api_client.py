@@ -6,7 +6,7 @@ Provides CLI interface that calls the API backend.
 
 import json
 import sys
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 import requests
 from datetime import datetime
 
@@ -76,7 +76,7 @@ class THSRApiClient:
         use_membership: bool,
         adult_cnt: Optional[int] = None,
         student_cnt: Optional[int] = None,
-        time: Optional[int] = None,
+        time: Optional[Union[int, str]] = None,
         train_index: Optional[int] = None,
         seat_prefer: Optional[int] = None,
         class_type: Optional[int] = None,
@@ -223,10 +223,11 @@ def print_task_list(tasks: list) -> None:
             time_info = ""
             if task.get('time'):
                 from .schema import TIME_TABLE
-                if task['time'] <= len(TIME_TABLE):
-                    time_info = f" @{TIME_TABLE[task['time']-1]}"
+                task_time = task['time']
+                if isinstance(task_time, int) and task_time <= len(TIME_TABLE):
+                    time_info = f" @{TIME_TABLE[task_time-1]}"
                 else:
-                    time_info = f" @T{task['time']}"
+                    time_info = f" @{task_time}"
             elif task.get('train_index'):
                 time_info = f" #{task['train_index']}"
             

@@ -463,7 +463,9 @@ export const thsrApi = {
       const response = await apiClient.get('/results', { params });
       return response.data;
     } catch (error) {
-      handleApiError(error);
+      if (typeof error === 'object' && error !== null) {
+        (error as any).suppressToast = true;
+      }
       throw error;
     }
   },
