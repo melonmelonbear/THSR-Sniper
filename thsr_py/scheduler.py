@@ -45,6 +45,7 @@ class BookingTask:
     seat_prefer: Optional[int] = None
     class_type: Optional[int] = None
     personal_id: Optional[str] = None
+    email: Optional[str] = None
     use_membership: Optional[bool] = None
     no_ocr: bool = False
     
@@ -85,11 +86,15 @@ class BookingTask:
             date=self.date,
             adult_cnt=self.adult_cnt,
             student_cnt=self.student_cnt,
+            child_cnt=self.child_cnt,
+            senior_cnt=self.senior_cnt,
+            disabled_cnt=self.disabled_cnt,
             time=self.time,
             train_index=self.train_index,
             seat_prefer=self.seat_prefer,
             class_type=self.class_type,
             personal_id=self.personal_id,
+            email=self.email,
             use_membership=self.use_membership,
             no_ocr=self.no_ocr,
             stations=False,
@@ -114,6 +119,7 @@ class BookingTask:
             "seat_prefer": self.seat_prefer,
             "class_type": self.class_type,
             "personal_id": self.personal_id,
+            "email": self.email,
             "use_membership": self.use_membership,
             "no_ocr": self.no_ocr,
             "interval_minutes": self.interval_minutes,
@@ -145,6 +151,7 @@ class BookingTask:
             seat_prefer=data.get("seat_prefer"),
             class_type=data.get("class_type"),
             personal_id=data.get("personal_id"),
+            email=data.get("email"),
             use_membership=data.get("use_membership"),
             no_ocr=data.get("no_ocr", False),
             interval_minutes=data.get("interval_minutes", 5),
@@ -727,6 +734,7 @@ def create_booking_task(
     date: str,
     personal_id: str,
     use_membership: bool,
+    email: Optional[str] = None,
     user_id: Optional[str] = None,
     adult_cnt: Optional[int] = None,
     student_cnt: Optional[int] = None,
@@ -811,6 +819,13 @@ def create_booking_task(
     personal_id = personal_id.strip().upper()
     if len(personal_id) != 10:
         raise ValueError("Personal ID must be 10 characters long")
+
+    if email is not None:
+        email = email.strip()
+        if not email:
+            email = None
+        elif len(email) > 254 or "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+            raise ValueError(f"Invalid email format: {email}")
     
     task = BookingTask(
         id=str(uuid.uuid4()),
@@ -818,6 +833,7 @@ def create_booking_task(
         to_station=to_station,
         date=date,
         user_id=user_id,
+        email=email,
         personal_id=personal_id,
         use_membership=use_membership,
         adult_cnt=adult_cnt,

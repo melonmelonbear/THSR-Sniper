@@ -68,6 +68,7 @@ export interface BookingRequest {
   to_station: number;
   date: string;
   personal_id: string;
+  email?: string;
   use_membership: boolean;
   adult_cnt?: number;
   student_cnt?: number;

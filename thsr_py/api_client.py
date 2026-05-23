@@ -74,6 +74,7 @@ class THSRApiClient:
         date: str,
         personal_id: str,
         use_membership: bool,
+        email: Optional[str] = None,
         adult_cnt: Optional[int] = None,
         student_cnt: Optional[int] = None,
         time: Optional[Union[int, str]] = None,
@@ -99,6 +100,8 @@ class THSRApiClient:
             payload["adult_cnt"] = adult_cnt
         if student_cnt is not None:
             payload["student_cnt"] = student_cnt
+        if email:
+            payload["email"] = email
         if time is not None:
             payload["time"] = time
         if train_index is not None:
@@ -316,6 +319,7 @@ def schedule_booking_via_api(args) -> None:
             date=args.date,
             personal_id=args.personal_id,
             use_membership=args.use_membership,
+            email=getattr(args, 'email', None),
             adult_cnt=adult_cnt,
             student_cnt=student_cnt,
             interval_minutes=getattr(args, 'interval', 5),

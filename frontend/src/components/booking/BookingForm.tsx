@@ -6,6 +6,7 @@ import { useNavigate } from 'react-router-dom';
 import { thsrApi } from '@/services/api';
 import { StationInfo, TimeSlotInfo, THSRInfo, BookingFormData } from '@/types';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
+import { useAuthStore } from '@/store/authStore';
 
 interface BookingFormProps {
   stations: StationInfo[];
@@ -15,6 +16,7 @@ interface BookingFormProps {
 
 const BookingForm: React.FC<BookingFormProps> = ({ stations, timeSlots, thsrInfo }) => {
   const navigate = useNavigate();
+  const { user } = useAuthStore();
   // Temporarily hide booking mode selection, use only scheduled booking
   const [bookingMode] = useState<'immediate' | 'scheduled'>('scheduled');
   
@@ -154,6 +156,7 @@ const BookingForm: React.FC<BookingFormProps> = ({ stations, timeSlots, thsrInfo
       to_station: data.toStation,
       date: data.date.replace(/-/g, '/'),
       personal_id: thsrInfo.personal_id,
+      ...(user?.email && { email: user.email }),
       use_membership: thsrInfo.use_membership,
       ...(adultTickets > 0 && { adult_cnt: adultTickets }),
       ...(studentTickets > 0 && { student_cnt: studentTickets }),

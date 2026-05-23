@@ -63,6 +63,7 @@ class BookingRequest(BaseModel):
     to_station: int = Field(..., ge=1, le=12, description="Arrival station ID (1-12)")
     date: str = Field(..., description="Departure date in YYYY/MM/DD format")
     personal_id: str = Field(..., description="Personal ID number (required)")
+    email: Optional[str] = Field(None, description="Email for THSR booking notification")
     use_membership: bool = Field(..., description="Use THSR membership (required)")
     adult_cnt: Optional[int] = Field(None, ge=0, le=10, description="Number of adult tickets (0-10)")
     student_cnt: Optional[int] = Field(None, ge=0, le=10, description="Number of student tickets (0-10)")
@@ -92,6 +93,17 @@ class BookingRequest(BaseModel):
         v = v.strip().upper()
         if len(v) != 10:
             raise ValueError("Personal ID must be 10 characters long")
+        return v
+
+    @validator('email')
+    def validate_email(cls, v):
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if len(v) > 254 or "@" not in v or "." not in v.rsplit("@", 1)[-1]:
+            raise ValueError("Invalid email format")
         return v
 
     @validator('time')
@@ -257,6 +269,7 @@ async def immediate_booking(request: BookingRequest):
             to=request.to_station,
             date=request.date,
             personal_id=request.personal_id,
+            email=request.email,
             use_membership=request.use_membership,
             adult_cnt=request.adult_cnt if request.adult_cnt is not None else 0,
             student_cnt=request.student_cnt if request.student_cnt is not None else 0,
@@ -347,6 +360,7 @@ async def schedule_booking(
             to_station=request.to_station,
             date=request.date,
             personal_id=request.personal_id,
+            email=request.email,
             use_membership=request.use_membership,
             user_id=task_user_id,  # Associate task with appropriate user
             adult_cnt=request.adult_cnt,

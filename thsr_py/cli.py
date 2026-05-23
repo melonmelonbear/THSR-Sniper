@@ -88,6 +88,11 @@ Examples:
         help="Personal ID number (required for booking)"
     )
     personal_group.add_argument(
+        "--email",
+        dest="email",
+        help="Email address for THSR booking notification"
+    )
+    personal_group.add_argument(
         "--member", "-m", 
         dest="use_membership", 
         help="Use membership (y/n, true/false, 1/0)"

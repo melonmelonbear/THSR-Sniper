@@ -670,6 +670,9 @@ def _select_train(trains: List[Dict[str, str]]) -> str:
 def _confirm_ticket_flow(session: requests.Session, soup: BeautifulSoup, args) -> Optional[BeautifulSoup]:
     payload = _ConfirmTicketPayload.default()
     personal_id = payload.input_personal_id(getattr(args, "personal_id", None))
+    email = getattr(args, "email", None)
+    if email:
+        payload.email = str(email).strip()
     radio_value, additional_payload = _process_membership(soup, personal_id, getattr(args, "use_membership", None))
     payload.member_radio = radio_value
 
