@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import multiprocessing
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -184,6 +185,43 @@ class BookingTask:
         return task
 
 
+def _run_booking_flow_in_subprocess(task_payload: Dict[str, Any], result_queue) -> None:
+    """Run the booking flow in an isolated process so OCR memory is released after each attempt."""
+    import io
+    import os
+    import sys
+    from argparse import Namespace
+    from contextlib import redirect_stdout, redirect_stderr
+
+    original_non_interactive = os.environ.get("THSR_NON_INTERACTIVE")
+    stdout_buffer = io.StringIO()
+    stderr_buffer = io.StringIO()
+
+    try:
+        os.environ["THSR_NON_INTERACTIVE"] = "1"
+        args = Namespace(**task_payload)
+
+        with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+            run_booking_flow(args)
+
+        result_queue.put({
+            "output": stdout_buffer.getvalue(),
+            "stderr": stderr_buffer.getvalue(),
+            "error": None,
+        })
+    except Exception as exc:
+        result_queue.put({
+            "output": stdout_buffer.getvalue(),
+            "stderr": stderr_buffer.getvalue(),
+            "error": str(exc),
+        })
+    finally:
+        if original_non_interactive is None:
+            os.environ.pop("THSR_NON_INTERACTIVE", None)
+        else:
+            os.environ["THSR_NON_INTERACTIVE"] = original_non_interactive
+
+
 class BookingScheduler:
     """Main scheduler class that manages multiple booking tasks."""
     
@@ -261,6 +299,7 @@ class BookingScheduler:
             # Try to acquire lock with timeout (shorter timeout for reads)
             lock_acquired = False
             lock_fd = None
+            recovered = False
             for attempt in range(5):  # Try for up to 0.5 seconds
                 try:
                     lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
@@ -292,8 +331,12 @@ class BookingScheduler:
                     for task_data in data.get("tasks", []):
                         task = BookingTask.from_dict(task_data)
                         self.tasks[task.id] = task
+
+                    recovered = self._recover_incomplete_tasks()
                     
                 self.logger.info(f"Loaded {len(self.tasks)} tasks from {self.storage_path}")
+                if recovered:
+                    self._save_tasks()
                 
             except json.JSONDecodeError as e:
                 self.logger.error(f"Failed to parse JSON from storage file: {e}")
@@ -318,6 +361,36 @@ class BookingScheduler:
                         pass
         else:
             self.logger.debug(f"No storage file found at {self.storage_path}, starting with empty task list")
+
+    def _recover_incomplete_tasks(self) -> bool:
+        """Recover tasks that were mid-flight when the scheduler process died."""
+        recovered = 0
+        now = datetime.now(timezone.utc)
+
+        for task in self.tasks.values():
+            if task.status != BookingStatus.RUNNING:
+                continue
+
+            if not is_ticket_sales_open(task.date):
+                task.status = BookingStatus.WAITING
+            else:
+                task.status = BookingStatus.PENDING
+
+            if task.error_message:
+                task.error_message = (
+                    f"{task.error_message} | Scheduler restarted before the attempt completed."
+                )[:500]
+            else:
+                task.error_message = "Scheduler restarted before the attempt completed."
+
+            if task.last_attempt is None:
+                task.last_attempt = now
+
+            recovered += 1
+
+        if recovered:
+            self.logger.warning(f"Recovered {recovered} incomplete running task(s) after restart")
+        return recovered > 0
     
     def _save_tasks(self) -> None:
         """Save tasks to storage file with simplified locking."""
@@ -476,6 +549,7 @@ class BookingScheduler:
         """Process all pending tasks."""
         self._load_tasks()
         current_time = datetime.now(timezone.utc)
+        state_changed = False
         
         for task in list(self.tasks.values()):
             if task.status in [BookingStatus.SUCCESS, BookingStatus.CANCELLED, BookingStatus.DELETED]:
@@ -485,6 +559,7 @@ class BookingScheduler:
             if task.is_expired():
                 task.status = BookingStatus.EXPIRED
                 self.logger.info(f"Task {task.id} expired")
+                state_changed = True
                 continue
             
             # Check if task should stop
@@ -492,6 +567,7 @@ class BookingScheduler:
                 task.status = BookingStatus.FAILED
                 task.error_message = "Maximum attempts reached"
                 self.logger.info(f"Task {task.id} stopped after {task.attempts} attempts")
+                state_changed = True
                 continue
             
             # Check if ticket sales are open for future booking dates
@@ -499,12 +575,14 @@ class BookingScheduler:
                 if task.status != BookingStatus.WAITING:
                     task.status = BookingStatus.WAITING
                     self.logger.info(f"Task {task.id} waiting for ticket sales to open at 00:00 Taiwan time")
+                    state_changed = True
                 continue
             
             # If task was waiting and ticket sales are now open, change to pending
             if task.status == BookingStatus.WAITING:
                 task.status = BookingStatus.PENDING
                 self.logger.info(f"Task {task.id} ticket sales now open, resuming booking attempts")
+                state_changed = True
             
             # Check if it's time to run this task
             if task.last_attempt is None:
@@ -525,9 +603,8 @@ class BookingScheduler:
         self._cleanup_deleted_tasks(current_time)
         
         # Only save if there were any changes in this cycle
-        # _execute_booking_task already saves its changes, so we don't need to save again
-        # This prevents unnecessary merge conflicts
-        # self._save_tasks_safe()  # Commented out to prevent SUCCESS status overwrites
+        if state_changed:
+            self._save_tasks()
     
     def _cleanup_deleted_tasks(self, current_time: datetime) -> None:
         """Clean up tasks that have been marked as deleted for more than 1 hour."""
@@ -591,11 +668,6 @@ class BookingScheduler:
     
     def _execute_booking_task(self, task: BookingTask) -> None:
         """Execute a single booking task."""
-        # Store original values for rollback if needed
-        original_status = task.status
-        original_attempts = task.attempts
-        original_last_attempt = task.last_attempt
-        
         # Update task status and attempt info with timezone-aware datetime
         task.status = BookingStatus.RUNNING
         task.last_attempt = datetime.now(timezone.utc)
@@ -609,34 +681,34 @@ class BookingScheduler:
         except Exception as save_error:
             self.logger.error(f"Failed to save task state before execution: {save_error}")
 
-        # Store environment variable for restoration
-        original_non_interactive = None
-        
         try:
-            # Convert task to args namespace
-            args = task.to_args_namespace()
-            
-            # Capture the booking flow output to detect success
-            import io
-            import sys
-            import os
-            from contextlib import redirect_stdout, redirect_stderr
-            
-            # Set environment variable to indicate non-interactive mode
-            original_non_interactive = os.environ.get('THSR_NON_INTERACTIVE')
-            os.environ['THSR_NON_INTERACTIVE'] = '1'
-            
-            # Create string buffers to capture output
-            stdout_buffer = io.StringIO()
-            stderr_buffer = io.StringIO()
-            
-            # Redirect stdout and stderr to capture output
-            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                run_booking_flow(args)
-            
-            # Check if booking was successful by looking for PNR in output
-            output = stdout_buffer.getvalue()
-            stderr_output = stderr_buffer.getvalue()
+            task_payload = vars(task.to_args_namespace())
+            result_queue = multiprocessing.Queue()
+            worker = multiprocessing.Process(
+                target=_run_booking_flow_in_subprocess,
+                args=(task_payload, result_queue),
+                daemon=True,
+            )
+            worker.start()
+            worker.join(timeout=180)
+
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=10)
+                raise TimeoutError("Booking execution timed out after 180 seconds")
+
+            result = {"output": "", "stderr": "", "error": None}
+            if not result_queue.empty():
+                result = result_queue.get()
+
+            if worker.exitcode not in (0, None) and not result.get("error"):
+                result["error"] = f"Booking worker exited with code {worker.exitcode}"
+
+            if result.get("error"):
+                raise RuntimeError(result["error"])
+
+            output = result.get("output", "")
+            stderr_output = result.get("stderr", "")
             
             self.logger.debug(f"Task {task.id} output length: stdout={len(output)}, stderr={len(stderr_output)}")
             
@@ -685,12 +757,6 @@ class BookingScheduler:
             self.logger.debug(f"Task {task.id} traceback: {traceback.format_exc()}")
         
         finally:
-            # Restore original environment variable
-            if original_non_interactive is None:
-                os.environ.pop('THSR_NON_INTERACTIVE', None)
-            else:
-                os.environ['THSR_NON_INTERACTIVE'] = original_non_interactive
-                
             # Always save the final state
             try:
                 self.logger.info(f"Task {task.id} FINAL SAVE - status={task.status.value}, pnr={task.success_pnr}")

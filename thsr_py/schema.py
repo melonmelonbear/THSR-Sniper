@@ -80,7 +80,6 @@ def is_ticket_sales_open(booking_date: str) -> bool:
     """
     Check if ticket sales are open for the given booking date.
     Taiwan High Speed Rail ticket sales open 28 days in advance at 00:00 Taiwan time.
-    We allow some flexibility for early sales due to holidays or special promotions.
     """
     try:
         # Parse booking date
@@ -89,13 +88,9 @@ def is_ticket_sales_open(booking_date: str) -> bool:
         
         # Calculate the date when ticket sales should open (28 days before booking date)
         sales_open_date = booking_date_obj - timedelta(days=28)
-        
-        # Allow more flexibility: start trying 4 days before official opening
-        # This handles cases where sales open early due to holidays or promotions
-        flexible_open_date = sales_open_date - timedelta(days=4)
-        
-        # Check if we're past the flexible open date
-        return taiwan_now.date() >= flexible_open_date
+
+        # Only start automated booking once the official sales window opens.
+        return taiwan_now.date() >= sales_open_date
     except ValueError:
         return False
 
