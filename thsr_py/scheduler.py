@@ -15,7 +15,7 @@ import fcntl
 import os
 
 from .flows import run as run_booking_flow
-from .schema import STATION_MAP, TIME_TABLE, TicketType, is_ticket_sales_open, get_taiwan_now, is_valid_time_preference
+from .schema import STATION_MAP, TIME_TABLE, TicketType, is_ticket_sales_open, get_taiwan_now, get_special_booking_windows, is_valid_time_preference
 
 
 class BookingStatus(Enum):
@@ -252,6 +252,8 @@ class BookingScheduler:
         # Load existing tasks if persistence is enabled
         if self.enable_persistence:
             self._load_tasks()
+
+        self._warm_special_booking_windows_cache()
     
     def _setup_logger(self) -> logging.Logger:
         """Setup logging for the scheduler."""
@@ -267,6 +269,14 @@ class BookingScheduler:
             logger.addHandler(handler)
         
         return logger
+
+    def _warm_special_booking_windows_cache(self) -> None:
+        """Fetch THSR special transport booking windows once during service startup."""
+        try:
+            windows = get_special_booking_windows(force_refresh=True)
+            self.logger.info(f"Loaded {len(windows)} THSR special booking windows")
+        except Exception as e:
+            self.logger.warning(f"Could not preload THSR special booking windows: {e}")
     
     def _should_reload_tasks(self) -> bool:
         """Check if tasks should be reloaded based on file modification time."""

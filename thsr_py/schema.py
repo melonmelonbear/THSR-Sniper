@@ -69,6 +69,12 @@ class TicketType:
 
 # Taiwan timezone utilities
 TAIWAN_TZ = timezone(timedelta(hours=8))
+THSR_SPECIAL_BOOKING_URL = "https://www.thsrc.com.tw/ArticleContent/60dbfb79-ac20-4280-8ffb-b09e7c94f043"
+SPECIAL_BOOKING_CACHE_TTL = timedelta(hours=6)
+_SPECIAL_BOOKING_WINDOWS_CACHE = {
+    "fetched_at": None,
+    "windows": [],
+}
 
 
 def get_taiwan_now() -> datetime:
@@ -93,11 +99,94 @@ def get_ticket_booking_window_end(now: Optional[datetime] = None):
     return latest_date
 
 
+def _parse_thsr_date(text: str):
+    """Extract a THSR date value from text such as '2026/02/13 (五)'."""
+    match = re.search(r"\d{4}/\d{1,2}/\d{1,2}", text or "")
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(0), "%Y/%m/%d").date()
+    except ValueError:
+        return None
+
+
+def _parse_special_booking_windows(html: str) -> List[Dict[str, object]]:
+    """Parse THSR special transport periods and presale dates from the official table."""
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    windows = []
+
+    for row in soup.select("tr"):
+        cells = [cell.get_text(" ", strip=True) for cell in row.select("th,td")]
+        if len(cells) < 3 or "疏運期間" in cells[1]:
+            continue
+
+        period_dates = re.findall(r"\d{4}/\d{1,2}/\d{1,2}", cells[1])
+        if len(period_dates) < 2:
+            continue
+
+        start_date = _parse_thsr_date(period_dates[0])
+        end_date = _parse_thsr_date(period_dates[1])
+        presale_date = _parse_thsr_date(cells[2])
+
+        if start_date and end_date and presale_date:
+            windows.append({
+                "name": cells[0],
+                "start_date": start_date,
+                "end_date": end_date,
+                "presale_date": presale_date,
+            })
+
+    return windows
+
+
+def get_special_booking_windows(now: Optional[datetime] = None, force_refresh: bool = False) -> List[Dict[str, object]]:
+    """Fetch and cache THSR special transport presale windows from the official page."""
+    taiwan_now = now.astimezone(TAIWAN_TZ) if now else get_taiwan_now()
+    fetched_at = _SPECIAL_BOOKING_WINDOWS_CACHE["fetched_at"]
+
+    if (
+        not force_refresh and
+        fetched_at and
+        taiwan_now - fetched_at < SPECIAL_BOOKING_CACHE_TTL
+    ):
+        return list(_SPECIAL_BOOKING_WINDOWS_CACHE["windows"])
+
+    try:
+        import requests
+
+        response = requests.get(
+            THSR_SPECIAL_BOOKING_URL,
+            timeout=10,
+            headers={"User-Agent": "THSR-Sniper/1.0"},
+        )
+        response.raise_for_status()
+        windows = _parse_special_booking_windows(response.text)
+        _SPECIAL_BOOKING_WINDOWS_CACHE["fetched_at"] = taiwan_now
+        _SPECIAL_BOOKING_WINDOWS_CACHE["windows"] = windows
+        return list(windows)
+    except Exception:
+        return list(_SPECIAL_BOOKING_WINDOWS_CACHE["windows"])
+
+
+def get_special_presale_date(booking_date_obj, now: Optional[datetime] = None):
+    """Return the special presale date if the booking date is in a THSR transport period."""
+    for window in get_special_booking_windows(now):
+        if window["start_date"] <= booking_date_obj <= window["end_date"]:
+            return window["presale_date"]
+    return None
+
+
 def is_ticket_sales_open(booking_date: str) -> bool:
     """
     Check if ticket sales are open for the given booking date.
     THSR opens reserved-seat booking for 29 days including today. On Fridays and
-    Saturdays, booking extends through the Sunday four weeks later.
+    Saturdays, booking extends through the Sunday four weeks later. For special
+    transport periods, the official presale table takes precedence when available.
     """
     try:
         booking_date_obj = datetime.strptime(booking_date, "%Y/%m/%d").date()
@@ -105,6 +194,10 @@ def is_ticket_sales_open(booking_date: str) -> bool:
 
         if booking_date_obj < taiwan_now.date():
             return False
+
+        special_presale_date = get_special_presale_date(booking_date_obj, taiwan_now)
+        if special_presale_date:
+            return taiwan_now.date() >= special_presale_date
 
         return booking_date_obj <= get_ticket_booking_window_end(taiwan_now)
     except ValueError:
