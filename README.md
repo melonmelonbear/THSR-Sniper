@@ -1,11 +1,11 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md)
 
-![Stars](https://img.shields.io/github/stars/SeanChangX/THSR-Sniper)
-![Release](https://img.shields.io/github/v/release/SeanChangX/THSR-Sniper)
-![Downloads](https://img.shields.io/github/downloads/SeanChangX/THSR-Sniper/total)
+![Stars](https://img.shields.io/github/stars/melonmelonbear/THSR-Sniper)
+![Release](https://img.shields.io/github/v/release/melonmelonbear/THSR-Sniper)
+![Downloads](https://img.shields.io/github/downloads/melonmelonbear/THSR-Sniper/total)
 ![Docker Pulls](https://img.shields.io/docker/pulls/seanchangx/thsr-sniper?logo=docker&logoColor=white&label=seanchangx%2Fthsr-sniper)
-![License](https://img.shields.io/github/license/SeanChangX/THSR-Sniper)
+![License](https://img.shields.io/github/license/melonmelonbear/THSR-Sniper)
 
 # THSR-Sniper
 
@@ -39,7 +39,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/SeanChangX/THSR-Sniper.git
+git clone https://github.com/melonmelonbear/THSR-Sniper.git
 cd THSR-Sniper
 ```
 
@@ -216,6 +216,15 @@ The system supports multiple date input formats:
 - `+7` - Next week
 - `tomorrow` or `tmr` - Tomorrow
 - `today` or `now` - Today
+
+## Ticket Booking Availability
+
+Scheduled tasks wait until THSR opens reserved-seat booking for the requested travel date:
+
+- Under the normal schedule, tickets are available for 29 days including today.
+- On Fridays and Saturdays, the booking window extends through the Sunday four weeks later.
+- For holiday or other special transport periods, the scheduler loads the official THSR presale timetable at startup and caches it for 6 hours.
+- If the official timetable cannot be retrieved, the scheduler falls back to the normal booking-window rules.
 
 ## Station Reference
 
@@ -503,6 +512,9 @@ THSR-Sniper/                    # Autonomous Taiwan High Speed Rail Booking Syst
 - **Persistent Storage**: JSON-based task serialization with atomic writes
 - **Status Tracking**: Six task states (pending/running/success/failed/expired/cancelled)
 - **Retry Logic**: Configurable intervals and maximum attempt limits
+- **Booking-Window Awareness**: Waits for normal, weekend-extended, and special-period ticket sales to open
+- **Isolated Attempts**: Runs each booking attempt in a separate process with a 180-second timeout to release OCR memory reliably
+- **Crash Recovery**: Restores tasks left in the running state after a scheduler restart
 - **Concurrent Execution**: Thread-safe task processing with proper locking
 - **Health Monitoring**: Watchdog service with automatic restart capabilities
 

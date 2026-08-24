@@ -1,11 +1,11 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md)
 
-![Stars](https://img.shields.io/github/stars/SeanChangX/THSR-Sniper)
-![Release](https://img.shields.io/github/v/release/SeanChangX/THSR-Sniper)
-![Downloads](https://img.shields.io/github/downloads/SeanChangX/THSR-Sniper/total)
+![Stars](https://img.shields.io/github/stars/melonmelonbear/THSR-Sniper)
+![Release](https://img.shields.io/github/v/release/melonmelonbear/THSR-Sniper)
+![Downloads](https://img.shields.io/github/downloads/melonmelonbear/THSR-Sniper/total)
 ![Docker Pulls](https://img.shields.io/docker/pulls/seanchangx/thsr-sniper?logo=docker&logoColor=white&label=seanchangx%2Fthsr-sniper)
-![License](https://img.shields.io/github/license/SeanChangX/THSR-Sniper)
+![License](https://img.shields.io/github/license/melonmelonbear/THSR-Sniper)
 
 # THSR-Sniper
 
@@ -39,7 +39,7 @@
 
 ```bash
 # 下載專案
-git clone https://github.com/SeanChangX/THSR-Sniper.git
+git clone https://github.com/melonmelonbear/THSR-Sniper.git
 cd THSR-Sniper
 ```
 
@@ -216,6 +216,15 @@ docker compose up -d thsr-sniper-api
 - `+7` - 下週
 - `tomorrow` 或 `tmr` - 明天
 - `today` 或 `now` - 今天
+
+## 訂票開放時間
+
+排程任務會等到高鐵開放指定乘車日的對號座訂票後才開始嘗試：
+
+- 一般情況下，可預訂含當日在內 29 天內的車票。
+- 每逢週五、週六，開放日期會延伸至四週後的週日。
+- 春節或其他特殊疏運期間，Scheduler 啟動時會讀取台灣高鐵官方預售時程，並快取 6 小時。
+- 若無法取得官方時程，系統會回退使用一般訂票窗口規則。
 
 ## 車站對照
 
@@ -503,6 +512,9 @@ THSR-Sniper/                    # 台灣高鐵自動訂票系統
 - **持久化儲存**：JSON 任務序列化與原子寫入
 - **狀態追蹤**：六種狀態（pending/running/success/failed/expired/cancelled）
 - **重試邏輯**：可設定間隔與最大嘗試次數
+- **訂票窗口感知**：支援一般、週末延伸及特殊疏運期間的開放規則
+- **隔離執行**：每次訂票在獨立程序執行，逾時上限為 180 秒，並能可靠釋放 OCR 記憶體
+- **異常恢復**：Scheduler 重啟後會恢復先前停留在 running 狀態的任務
 - **並行處理**：執行緒安全並帶鎖
 - **健康監測**：Watchdog 自動重啟能力
 
