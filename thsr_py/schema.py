@@ -76,21 +76,37 @@ def get_taiwan_now() -> datetime:
     return datetime.now(TAIWAN_TZ)
 
 
+def get_ticket_booking_window_end(now: Optional[datetime] = None):
+    """Return the latest travel date currently open for THSR reserved-seat booking."""
+    taiwan_now = now.astimezone(TAIWAN_TZ) if now else get_taiwan_now()
+    today = taiwan_now.date()
+
+    # THSR normally opens tickets within 29 days including today.
+    latest_date = today + timedelta(days=28)
+
+    # On Fridays and Saturdays, booking extends through the Sunday four weeks later.
+    # Example: Friday 2024/01/05 can book through Sunday 2024/02/04.
+    if today.weekday() in (4, 5):
+        days_until_this_sunday = 6 - today.weekday()
+        latest_date = today + timedelta(days=days_until_this_sunday + 28)
+
+    return latest_date
+
+
 def is_ticket_sales_open(booking_date: str) -> bool:
     """
     Check if ticket sales are open for the given booking date.
-    Taiwan High Speed Rail ticket sales open 28 days in advance at 00:00 Taiwan time.
+    THSR opens reserved-seat booking for 29 days including today. On Fridays and
+    Saturdays, booking extends through the Sunday four weeks later.
     """
     try:
-        # Parse booking date
         booking_date_obj = datetime.strptime(booking_date, "%Y/%m/%d").date()
         taiwan_now = get_taiwan_now()
-        
-        # Calculate the date when ticket sales should open (28 days before booking date)
-        sales_open_date = booking_date_obj - timedelta(days=28)
 
-        # Only start automated booking once the official sales window opens.
-        return taiwan_now.date() >= sales_open_date
+        if booking_date_obj < taiwan_now.date():
+            return False
+
+        return booking_date_obj <= get_ticket_booking_window_end(taiwan_now)
     except ValueError:
         return False
 
