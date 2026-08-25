@@ -7,6 +7,7 @@ import { thsrApi } from '@/services/api';
 import { StationInfo, TimeSlotInfo, THSRInfo, BookingFormData } from '@/types';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { useAuthStore } from '@/store/authStore';
+import { getStationDisplayName } from '@/utils/stations';
 
 interface BookingFormProps {
   stations: StationInfo[];
@@ -24,11 +25,15 @@ const BookingForm: React.FC<BookingFormProps> = ({ stations, timeSlots, thsrInfo
     register,
     handleSubmit,
     watch,
+    setValue,
+    getValues,
+    clearErrors,
+    trigger,
     formState: { errors },
   } = useForm<BookingFormData>({
     defaultValues: {
       fromStation: 1,
-      toStation: 2,
+      toStation: 11,
       date: new Date().toISOString().split('T')[0],
       adultCount: 1,
       studentCount: 0,
@@ -49,7 +54,16 @@ const BookingForm: React.FC<BookingFormProps> = ({ stations, timeSlots, thsrInfo
   const childCount = watch('childCount');
   const seniorCount = watch('seniorCount');
   const disabledCount = watch('disabledCount');
-  const fromStation = watch('fromStation');
+
+  const handleSwapStations = async () => {
+    const currentFromStation = getValues('fromStation');
+    const currentToStation = getValues('toStation');
+
+    setValue('fromStation', currentToStation, { shouldDirty: true, shouldValidate: false });
+    setValue('toStation', currentFromStation, { shouldDirty: true, shouldValidate: false });
+    clearErrors(['fromStation', 'toStation']);
+    await trigger(['fromStation', 'toStation']);
+  };
 
   // Immediate booking mutation
   const immediateBookingMutation = useMutation(thsrApi.immediateBooking, {
@@ -255,7 +269,7 @@ const BookingForm: React.FC<BookingFormProps> = ({ stations, timeSlots, thsrInfo
           </h3>
         </div>
 
-        <div className="form-grid">
+        <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-4 items-end">
           {/* From Station */}
           <div className="form-group">
             <label htmlFor="fromStation" className="form-label">出發站</label>
@@ -266,11 +280,25 @@ const BookingForm: React.FC<BookingFormProps> = ({ stations, timeSlots, thsrInfo
             >
               {stations.map((station) => (
                 <option key={station.id} value={station.id}>
-                  {station.name}
+                  {getStationDisplayName(station)}
                 </option>
               ))}
             </select>
           </div>
+
+          {/* Swap Stations */}
+          <button
+            type="button"
+            onClick={handleSwapStations}
+            className="rog-btn bg-bg-input text-text-primary border border-gray-600 hover:bg-bg-tertiary hover:border-gray-500 focus:ring-gray-500 px-4 py-3"
+            aria-label="交換出發站與到達站"
+            title="交換出發站與到達站"
+          >
+            <svg className="w-5 h-5 md:rotate-0 rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h11m0 0l-3-3m3 3l-3 3M17 17H6m0 0l3 3m-3-3l3-3" />
+            </svg>
+            <span className="ml-2 md:hidden">交換站點</span>
+          </button>
 
           {/* To Station */}
           <div className="form-group">
@@ -278,14 +306,14 @@ const BookingForm: React.FC<BookingFormProps> = ({ stations, timeSlots, thsrInfo
             <select
               {...register('toStation', { 
                 required: '請選擇到達站',
-                validate: value => value !== fromStation || '出發站和到達站不能相同'
+                validate: value => value !== getValues('fromStation') || '出發站和到達站不能相同'
               })}
               id="toStation"
               className="rog-select"
             >
               {stations.map((station) => (
                 <option key={station.id} value={station.id}>
-                  {station.name}
+                  {getStationDisplayName(station)}
                 </option>
               ))}
             </select>
@@ -293,7 +321,9 @@ const BookingForm: React.FC<BookingFormProps> = ({ stations, timeSlots, thsrInfo
               <p className="text-rog-danger text-sm mt-1">{errors.toStation.message}</p>
             )}
           </div>
+        </div>
 
+        <div className="form-grid mt-4">
           {/* Date */}
           <div className="form-group">
             <label htmlFor="date" className="form-label">出發日期</label>

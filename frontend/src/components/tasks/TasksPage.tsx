@@ -59,6 +59,34 @@ const formatDepartureTime = (timeValue: number | string | undefined, timeSlots: 
   return `時間索引 ${timeValue}`;
 };
 
+// Booking defaults are standard class and no seat preference. Older persisted
+// tasks may not contain these fields, so missing values use the same defaults.
+const formatClassType = (classType: number | undefined): string => {
+  switch (classType) {
+    case 1:
+      return '商務車廂';
+    case 0:
+    case undefined:
+      return '標準車廂';
+    default:
+      return `未知類型 (${classType})`;
+  }
+};
+
+const formatSeatPreference = (seatPreference: number | undefined): string => {
+  switch (seatPreference) {
+    case 1:
+      return '靠窗';
+    case 2:
+      return '靠走道';
+    case 0:
+    case undefined:
+      return '不指定';
+    default:
+      return `未知偏好 (${seatPreference})`;
+  }
+};
+
 const TasksPage: React.FC = () => {
   const queryClient = useQueryClient();
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
@@ -307,6 +335,18 @@ const TasksPage: React.FC = () => {
                         <p className="text-text-muted text-sm">乘客</p>
                         <p className="text-text-primary">
                           {formatPassengerCounts(task)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-text-muted text-sm">車廂類型</p>
+                        <p className="text-text-primary">
+                          {formatClassType(task.class_type)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-text-muted text-sm">座位偏好</p>
+                        <p className="text-text-primary">
+                          {formatSeatPreference(task.seat_prefer)}
                         </p>
                       </div>
                       <div>

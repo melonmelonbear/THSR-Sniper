@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 import uuid
 import multiprocessing
+import random
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -224,6 +226,9 @@ def _run_booking_flow_in_subprocess(task_payload: Dict[str, Any], result_queue) 
 
 class BookingScheduler:
     """Main scheduler class that manages multiple booking tasks."""
+
+    MAX_CONCURRENT_ATTEMPTS = 2
+    ATTEMPT_START_JITTER_SECONDS = 1.0
     
     def __init__(self, storage_path: str = None, enable_persistence: bool = True):
         self.enable_persistence = enable_persistence
@@ -244,6 +249,12 @@ class BookingScheduler:
         self.tasks: Dict[str, BookingTask] = {}
         self.running = False
         self.scheduler_thread: Optional[threading.Thread] = None
+        self._state_lock = threading.RLock()
+        self._attempt_executor = ThreadPoolExecutor(
+            max_workers=self.MAX_CONCURRENT_ATTEMPTS,
+            thread_name_prefix="thsr-booking",
+        )
+        self._active_attempts: Dict[str, Future] = {}
         self.logger = self._setup_logger()
         
         # Initialize file modification time tracking
@@ -554,15 +565,49 @@ class BookingScheduler:
             except Exception as e:
                 self.logger.error(f"Error in scheduler loop: {e}")
                 time.sleep(60)  # Wait longer on error
+
+    def _reap_completed_attempts(self) -> None:
+        """Remove completed attempt futures and report unexpected worker failures."""
+        completed_task_ids = [
+            task_id
+            for task_id, future in self._active_attempts.items()
+            if future.done()
+        ]
+
+        for task_id in completed_task_ids:
+            future = self._active_attempts.pop(task_id)
+            try:
+                future.result()
+            except Exception as exc:
+                self.logger.error(f"Concurrent booking worker for task {task_id} failed: {exc}")
+
+    def _run_booking_task_with_jitter(self, task: BookingTask) -> None:
+        """Start an attempt after a small random delay to avoid a request burst."""
+        delay = random.uniform(0, self.ATTEMPT_START_JITTER_SECONDS)
+        if delay > 0:
+            self.logger.info(f"Task {task.id} starting in {delay:.2f}s")
+            time.sleep(delay)
+        self._execute_booking_task(task)
+
+    def _save_tasks_threadsafe(self) -> None:
+        """Merge and persist task state while serializing concurrent writers."""
+        with self._state_lock:
+            self._save_tasks_safe()
     
     def _process_tasks(self) -> None:
         """Process all pending tasks."""
-        self._load_tasks()
+        self._reap_completed_attempts()
+        if not self._active_attempts:
+            self._load_tasks()
         current_time = datetime.now(timezone.utc)
         state_changed = False
+        tasks_to_run: List[BookingTask] = []
         
         for task in list(self.tasks.values()):
             if task.status in [BookingStatus.SUCCESS, BookingStatus.CANCELLED, BookingStatus.DELETED]:
+                continue
+
+            if task.status == BookingStatus.RUNNING or task.id in self._active_attempts:
                 continue
             
             # Check if task is expired
@@ -607,15 +652,28 @@ class BookingScheduler:
                 should_run = time_since_last >= timedelta(minutes=task.interval_minutes)
             
             if should_run:
-                self._execute_booking_task(task)
+                task.status = BookingStatus.RUNNING
+                task.last_attempt = datetime.now(timezone.utc)
+                task.attempts += 1
+                tasks_to_run.append(task)
+                state_changed = True
+
+        if state_changed:
+            self._save_tasks_threadsafe()
+
+        for task in tasks_to_run:
+            self.logger.info(
+                f"Queueing task {task.id} (attempt {task.attempts}, "
+                f"max concurrency {self.MAX_CONCURRENT_ATTEMPTS})"
+            )
+            self._active_attempts[task.id] = self._attempt_executor.submit(
+                self._run_booking_task_with_jitter,
+                task,
+            )
         
         # Periodically clean up old deleted tasks (every hour)
         self._cleanup_deleted_tasks(current_time)
         
-        # Only save if there were any changes in this cycle
-        if state_changed:
-            self._save_tasks()
-    
     def _cleanup_deleted_tasks(self, current_time: datetime) -> None:
         """Clean up tasks that have been marked as deleted for more than 1 hour."""
         if not hasattr(self, '_last_cleanup_time'):
@@ -678,23 +736,13 @@ class BookingScheduler:
     
     def _execute_booking_task(self, task: BookingTask) -> None:
         """Execute a single booking task."""
-        # Update task status and attempt info with timezone-aware datetime
-        task.status = BookingStatus.RUNNING
-        task.last_attempt = datetime.now(timezone.utc)
-        task.attempts += 1
-        
         self.logger.info(f"Executing task {task.id} (attempt {task.attempts})")
-        
-        # Save immediately after updating attempt count
-        try:
-            self._save_tasks()
-        except Exception as save_error:
-            self.logger.error(f"Failed to save task state before execution: {save_error}")
 
         try:
             task_payload = vars(task.to_args_namespace())
-            result_queue = multiprocessing.Queue()
-            worker = multiprocessing.Process(
+            process_context = multiprocessing.get_context("spawn")
+            result_queue = process_context.Queue()
+            worker = process_context.Process(
                 target=_run_booking_flow_in_subprocess,
                 args=(task_payload, result_queue),
                 daemon=True,
@@ -770,8 +818,7 @@ class BookingScheduler:
             # Always save the final state
             try:
                 self.logger.info(f"Task {task.id} FINAL SAVE - status={task.status.value}, pnr={task.success_pnr}")
-                # Save the task state
-                self._save_tasks()
+                self._save_tasks_threadsafe()
                 self.logger.info(f"Task {task.id} SAVE COMPLETED - status={task.status.value}, attempts={task.attempts}")
             except Exception as save_error:
                 self.logger.error(f"Failed to save task state after execution: {save_error}")
