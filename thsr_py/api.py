@@ -3,7 +3,7 @@ from __future__ import annotations
 import requests
 import os
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -146,12 +146,17 @@ class BookingResponse(BaseModel):
     task_id: Optional[str] = None
 
 
+class TaskPriorityRequest(BaseModel):
+    direction: Literal["up", "down"]
+
+
 class TaskStatusResponse(BaseModel):
     id: str
     status: str
     from_station: int
     to_station: int
     date: str
+    priority: int
     adult_cnt: Optional[int] = None
     student_cnt: Optional[int] = None
     child_cnt: Optional[int] = None
@@ -412,6 +417,7 @@ async def list_tasks(current_user_id: Optional[str] = Depends(get_current_user))
             from_station=task.from_station,
             to_station=task.to_station,
             date=task.date,
+            priority=task.priority,
             adult_cnt=task.adult_cnt,
             student_cnt=task.student_cnt,
             child_cnt=task.child_cnt,
@@ -456,6 +462,7 @@ async def get_task_status(
         from_station=task.from_station,
         to_station=task.to_station,
         date=task.date,
+        priority=task.priority,
         adult_cnt=task.adult_cnt,
         student_cnt=task.student_cnt,
         child_cnt=task.child_cnt,
@@ -487,7 +494,7 @@ async def cancel_task(
     
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     # Check task ownership (CLI internal access bypasses this check)
     if current_user_id != "cli-internal" and task.user_id != current_user_id:
         raise HTTPException(status_code=403, detail="Access denied: You can only cancel your own tasks")
@@ -501,6 +508,33 @@ async def cancel_task(
         )
     else:
         raise HTTPException(status_code=404, detail="Task not found")
+
+
+@app.patch("/tasks/{task_id}/priority", response_model=BookingResponse)
+async def move_task_priority(
+    task_id: str,
+    request: TaskPriorityRequest,
+    current_user_id: Optional[str] = Depends(get_current_user),
+):
+    """Move an active task up or down within the authenticated user's queue."""
+    if not current_user_id:
+        raise HTTPException(status_code=401, detail="Authentication required to reorder tasks")
+
+    scheduler = get_scheduler()
+    task = scheduler.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if current_user_id != "cli-internal" and task.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="Access denied: You can only reorder your own tasks")
+
+    user_check_id = None if current_user_id == "cli-internal" else current_user_id
+    if not scheduler.move_task(task_id, request.direction, user_check_id):
+        raise HTTPException(status_code=400, detail="Task cannot be moved in that direction")
+
+    return BookingResponse(
+        success=True,
+        message=f"Task {task_id} moved {request.direction} successfully",
+    )
 
 
 @app.delete("/tasks/{task_id}/remove", response_model=BookingResponse)
@@ -684,8 +718,15 @@ async def get_results(
         if status:
             tasks = [task for task in tasks if task.status.value == status.lower()]
         
-        # Sort by creation time (newest first)
-        tasks.sort(key=lambda x: x.created_at, reverse=True)
+        # Active tasks follow scheduling priority; completed tasks remain newest first.
+        active_statuses = {BookingStatus.PENDING, BookingStatus.RUNNING, BookingStatus.WAITING}
+        tasks.sort(
+            key=lambda task: (
+                0 if task.status in active_statuses else 1,
+                task.priority if task.status in active_statuses else 0,
+                task.created_at.timestamp() if task.status in active_statuses else -task.created_at.timestamp(),
+            )
+        )
         
         # Apply pagination
         total = len(tasks)
@@ -700,6 +741,7 @@ async def get_results(
                 "from_station": task.from_station,
                 "to_station": task.to_station,
                 "date": task.date,
+                "priority": task.priority,
                 "adult_cnt": task.adult_cnt,
                 "student_cnt": task.student_cnt,
                 "child_cnt": task.child_cnt,
@@ -812,6 +854,7 @@ async def get_task_result(
             "from_station": task.from_station,
             "to_station": task.to_station,
             "date": task.date,
+            "priority": task.priority,
             "adult_cnt": task.adult_cnt,
             "student_cnt": task.student_cnt,
             "child_cnt": task.child_cnt,

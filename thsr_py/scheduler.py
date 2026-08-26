@@ -55,6 +55,7 @@ class BookingTask:
     # Scheduler settings
     interval_minutes: int = 5
     max_attempts: Optional[int] = None  # None means unlimited until expired
+    priority: int = 0
     
     # Status tracking
     status: BookingStatus = BookingStatus.PENDING
@@ -127,6 +128,7 @@ class BookingTask:
             "no_ocr": self.no_ocr,
             "interval_minutes": self.interval_minutes,
             "max_attempts": self.max_attempts,
+            "priority": self.priority,
             "status": self.status.value,
             "created_at": self.created_at.isoformat().replace('+00:00', 'Z'),
             "last_attempt": self.last_attempt.isoformat().replace('+00:00', 'Z') if self.last_attempt else None,
@@ -159,6 +161,7 @@ class BookingTask:
             no_ocr=data.get("no_ocr", False),
             interval_minutes=data.get("interval_minutes", 5),
             max_attempts=data.get("max_attempts"),
+            priority=data.get("priority", 0),
             status=BookingStatus(data.get("status", "pending")),
             attempts=data.get("attempts", 0),
             success_pnr=data.get("success_pnr"),
@@ -229,6 +232,11 @@ class BookingScheduler:
 
     MAX_CONCURRENT_ATTEMPTS = 2
     ATTEMPT_START_JITTER_SECONDS = 1.0
+    REORDERABLE_STATUSES = {
+        BookingStatus.PENDING,
+        BookingStatus.RUNNING,
+        BookingStatus.WAITING,
+    }
     
     def __init__(self, storage_path: str = None, enable_persistence: bool = True):
         self.enable_persistence = enable_persistence
@@ -353,6 +361,7 @@ class BookingScheduler:
                         task = BookingTask.from_dict(task_data)
                         self.tasks[task.id] = task
 
+                    self._normalize_priorities()
                     recovered = self._recover_incomplete_tasks()
                     
                 self.logger.info(f"Loaded {len(self.tasks)} tasks from {self.storage_path}")
@@ -412,6 +421,30 @@ class BookingScheduler:
         if recovered:
             self.logger.warning(f"Recovered {recovered} incomplete running task(s) after restart")
         return recovered > 0
+
+    def _normalize_priorities(self, user_id: Optional[str] = None) -> None:
+        """Assign stable consecutive priorities to active tasks, including legacy data."""
+        owner_ids = {
+            task.user_id
+            for task in self.tasks.values()
+            if task.status in self.REORDERABLE_STATUSES
+            and (user_id is None or task.user_id == user_id)
+        }
+
+        for owner_id in owner_ids:
+            owner_tasks = [
+                task
+                for task in self.tasks.values()
+                if task.user_id == owner_id and task.status in self.REORDERABLE_STATUSES
+            ]
+            owner_tasks.sort(
+                key=lambda task: (
+                    task.priority if task.priority > 0 else float("inf"),
+                    task.created_at,
+                )
+            )
+            for index, task in enumerate(owner_tasks, start=1):
+                task.priority = index
     
     def _save_tasks(self) -> None:
         """Save tasks to storage file with simplified locking."""
@@ -474,11 +507,65 @@ class BookingScheduler:
 
         if not task.id:
             task.id = str(uuid.uuid4())
+
+        if task.priority <= 0:
+            self._normalize_priorities(task.user_id)
+            owner_task_count = sum(
+                1
+                for existing in self.tasks.values()
+                if existing.user_id == task.user_id
+                and existing.status in self.REORDERABLE_STATUSES
+            )
+            task.priority = owner_task_count + 1
         
         self.tasks[task.id] = task
         self._save_tasks()
         self.logger.info(f"Added new booking task: {task.id}")
         return task.id
+
+    def move_task(self, task_id: str, direction: str, user_id: Optional[str] = None) -> bool:
+        """Move an active task up or down within its owner's scheduling priority."""
+        if direction not in {"up", "down"}:
+            return False
+
+        self._load_tasks(force=True)
+        task = self.tasks.get(task_id)
+        if not task or task.status not in self.REORDERABLE_STATUSES:
+            return False
+        if user_id is not None and task.user_id != user_id:
+            return False
+
+        owner_tasks = [
+            candidate
+            for candidate in self.tasks.values()
+            if candidate.user_id == task.user_id
+            and candidate.status in self.REORDERABLE_STATUSES
+        ]
+        owner_tasks.sort(
+            key=lambda candidate: (
+                candidate.priority if candidate.priority > 0 else float("inf"),
+                candidate.created_at,
+            )
+        )
+
+        # Normalize legacy tasks that do not yet have an explicit priority.
+        for index, candidate in enumerate(owner_tasks, start=1):
+            candidate.priority = index
+
+        current_index = next(
+            (index for index, candidate in enumerate(owner_tasks) if candidate.id == task_id),
+            -1,
+        )
+        target_index = current_index + (-1 if direction == "up" else 1)
+        if current_index < 0 or target_index < 0 or target_index >= len(owner_tasks):
+            return False
+
+        current_task = owner_tasks[current_index]
+        target_task = owner_tasks[target_index]
+        current_task.priority, target_task.priority = target_task.priority, current_task.priority
+        self._save_tasks()
+        self.logger.info(f"Moved task {task_id} {direction} to priority {current_task.priority}")
+        return True
     
     def get_task(self, task_id: str) -> Optional[BookingTask]:
         """Get a specific task by ID."""
@@ -593,6 +680,25 @@ class BookingScheduler:
         """Merge and persist task state while serializing concurrent writers."""
         with self._state_lock:
             self._save_tasks_safe()
+
+    @staticmethod
+    def _retry_delay_for_task(task: BookingTask) -> timedelta:
+        """Use shorter early retries for transient booking-session failures."""
+        configured_delay = timedelta(minutes=task.interval_minutes)
+        error_message = (task.error_message or "").lower()
+        session_failure = (
+            "cannot establish session" in error_message
+            or "rate-limited" in error_message
+            or "maintenance-or-overloaded" in error_message
+            or "unexpected-page" in error_message
+        )
+        if not session_failure:
+            return configured_delay
+        if task.attempts <= 5:
+            return min(configured_delay, timedelta(minutes=1))
+        if task.attempts <= 10:
+            return min(configured_delay, timedelta(minutes=2))
+        return configured_delay
     
     def _process_tasks(self) -> None:
         """Process all pending tasks."""
@@ -603,7 +709,15 @@ class BookingScheduler:
         state_changed = False
         tasks_to_run: List[BookingTask] = []
         
-        for task in list(self.tasks.values()):
+        ordered_tasks = sorted(
+            self.tasks.values(),
+            key=lambda task: (
+                task.priority if task.priority > 0 else float("inf"),
+                task.created_at,
+            ),
+        )
+
+        for task in ordered_tasks:
             if task.status in [BookingStatus.SUCCESS, BookingStatus.CANCELLED, BookingStatus.DELETED]:
                 continue
 
@@ -649,7 +763,7 @@ class BookingScheduler:
                     task_last_attempt = task_last_attempt.replace(tzinfo=timezone.utc)
                 
                 time_since_last = current_time - task_last_attempt
-                should_run = time_since_last >= timedelta(minutes=task.interval_minutes)
+                should_run = time_since_last >= self._retry_delay_for_task(task)
             
             if should_run:
                 task.status = BookingStatus.RUNNING
@@ -718,6 +832,9 @@ class BookingScheduler:
             for task_id, task in current_tasks.items():
                 if task_id in self.tasks:
                     existing_task = self.tasks[task_id]
+                    # Priority can be changed by the API while an attempt is running.
+                    # Always retain the latest value loaded from persistent storage.
+                    task.priority = existing_task.priority
                     
                     # ALWAYS preserve completed tasks (SUCCESS, CANCELLED, DELETED)
                     if task.status in [BookingStatus.SUCCESS, BookingStatus.CANCELLED, BookingStatus.DELETED]:
@@ -748,12 +865,15 @@ class BookingScheduler:
                 daemon=True,
             )
             worker.start()
-            worker.join(timeout=180)
+            booking_timeout_seconds = 420
+            worker.join(timeout=booking_timeout_seconds)
 
             if worker.is_alive():
                 worker.terminate()
                 worker.join(timeout=10)
-                raise TimeoutError("Booking execution timed out after 180 seconds")
+                raise TimeoutError(
+                    f"Booking execution timed out after {booking_timeout_seconds} seconds"
+                )
 
             result = {"output": "", "stderr": "", "error": None}
             if not result_queue.empty():

@@ -100,6 +100,7 @@ export interface TaskStatusResponse {
   from_station: number;
   to_station: number;
   date: string;
+  priority: number;
   user_id?: string;
   interval_minutes: number;
   attempts: number;
@@ -122,6 +123,7 @@ export interface BookingTask {
   from_station: number;
   to_station: number;
   date: string;
+  priority: number;
   user_id?: string;
   adult_cnt?: number;
   student_cnt?: number;

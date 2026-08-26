@@ -442,6 +442,16 @@ export const thsrApi = {
     }
   },
 
+  async moveTaskPriority(taskId: string, direction: 'up' | 'down'): Promise<BookingResponse> {
+    try {
+      const response = await apiClient.patch(`/tasks/${taskId}/priority`, { direction });
+      return response.data;
+    } catch (error) {
+      handleApiError(error);
+      throw error;
+    }
+  },
+
   async getSchedulerStatus(): Promise<SchedulerStatus> {
     try {
       const response = await apiClient.get('/scheduler/status');

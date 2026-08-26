@@ -3,11 +3,15 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
+import json
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
 from typing import Dict, List, Optional, Tuple, Union
 from pathlib import Path
 
-import requests
+from curl_cffi import requests
 from bs4 import BeautifulSoup
 
 from .schema import (
@@ -29,6 +33,20 @@ CONFIRM_TRAIN_URL = (
 CONFIRM_TICKET_URL = (
     "https://irs.thsrc.com.tw/IMINT/?wicket:interface=:2:BookingS3Form::IFormSubmitListener"
 )
+
+SESSION_MAX_ATTEMPTS = 4
+SESSION_MAX_ELAPSED_SECONDS = 100
+SESSION_REQUEST_MIN_SPACING_SECONDS = 1.5
+SESSION_RETRY_DELAYS_SECONDS = (0, 2, 5, 10)
+SESSION_GATE_PATH = "/tmp/thsr-sniper-session-acquisition.lock"
+SESSION_STATE_PATH = "/tmp/thsr-sniper-session-circuit.json"
+SESSION_COOLDOWN_SECONDS = {
+    "rate-limited": 30.0,
+    "queue": 15.0,
+    "maintenance-or-overloaded": 20.0,
+    "unexpected-page": 10.0,
+    "connection-error": 5.0,
+}
 
 
 def _print_header(title: str) -> None:
@@ -96,40 +114,208 @@ def _print_section(title: str) -> None:
 
 
 def _headers() -> Dict[str, str]:
-    import random
-    import time
-    import uuid
-    
-    # Generate unique session-like identifiers for each request
-    session_id = f"{random.randint(100000, 999999)}_{int(time.time())}"
-    device_id = str(uuid.uuid4())[:8]
-    browser_version = f"137.{random.randint(0, 9)}"
-    
-    # Randomize some header values to simulate different users/devices
-    windows_versions = ["10.0", "11.0"]
-    firefox_versions = [f"137.{random.randint(0, 9)}", f"136.{random.randint(0, 9)}", f"138.{random.randint(0, 9)}"]
-    
-    selected_windows = random.choice(windows_versions)
-    selected_firefox = random.choice(firefox_versions)
-    
+    """Return only locale preferences; curl_cffi supplies coherent Chrome headers."""
     return {
-        "Host": "irs.thsrc.com.tw",
-        "User-Agent": f"Mozilla/5.0 (Windows NT {selected_windows}; Win64; x64; rv:{selected_firefox}) Gecko/20100101 Firefox/{selected_firefox}",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "zh-TW,zh;q=0.8,en-US;q=0.5,en;q=0.3",
-        "Accept-Encoding": "deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Referer": "https://irs.thsrc.com.tw/IMINT/",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "no-cors",
-        # Add session-like headers to make each request appear unique
-        "X-Requested-With": "XMLHttpRequest",
-        "X-Session-ID": session_id,
-        "X-Device-ID": device_id,
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
     }
+
+
+def _get_jsession_id(session: requests.Session, response: requests.Response) -> Optional[str]:
+    """Return the JSESSIONID cookie without exposing it in diagnostics."""
+    for cookie_jar in (session.cookies, response.cookies):
+        for cookie in getattr(cookie_jar, "jar", cookie_jar):
+            if cookie.name.upper() == "JSESSIONID":
+                return cookie.value
+    return None
+
+
+def _cookie_names(cookie_jar) -> List[str]:
+    """Return cookie names across requests and curl_cffi cookie containers."""
+    return sorted({cookie.name for cookie in getattr(cookie_jar, "jar", cookie_jar)})
+
+
+def _classify_session_response(response: requests.Response) -> Tuple[str, str]:
+    """Classify booking, queue, maintenance, and rate-limit responses."""
+    soup = BeautifulSoup(response.text or "", "html.parser")
+    title = soup.title.get_text(" ", strip=True)[:120] if soup.title else "(no title)"
+    searchable = f"{title} {soup.get_text(' ', strip=True)[:10000]}".lower()
+
+    if response.status_code == 429:
+        return "rate-limited", title
+    if response.status_code >= 500:
+        return "maintenance-or-overloaded", title
+    if any(marker in searchable for marker in (
+        "waiting room", "queue-it", "queue", "排隊", "等候進入", "流量管制",
+    )):
+        return "queue", title
+    if any(marker in searchable for marker in (
+        "maintenance", "service unavailable", "系統維護", "系統忙碌", "稍後再試",
+    )):
+        return "maintenance-or-overloaded", title
+    if soup.select_one("#BookingS1Form_homeCaptcha_passCode"):
+        return "booking-page", title
+    return "unexpected-page", title
+
+
+def _retry_after_seconds(response: requests.Response) -> Optional[float]:
+    """Parse Retry-After as seconds or an HTTP date, with a conservative cap."""
+    value = response.headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            seconds = retry_at.timestamp() - time.time()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return min(max(seconds, 1.0), 30.0)
+
+
+def _load_session_circuit_state() -> Dict[str, Union[int, float, str]]:
+    """Load the cross-process session circuit state while holding its gate."""
+    try:
+        with open(SESSION_STATE_PATH, "r") as state_file:
+            state = json.load(state_file)
+        if isinstance(state, dict):
+            return state
+    except (OSError, ValueError, TypeError):
+        pass
+    return {"failure_count": 0, "cooldown_until": 0.0, "last_reason": ""}
+
+
+def _save_session_circuit_state(state: Dict[str, Union[int, float, str]]) -> None:
+    """Persist the small circuit state atomically within the shared container."""
+    state_dir = os.path.dirname(SESSION_STATE_PATH) or "."
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=state_dir,
+            prefix="thsr-session-circuit-",
+            delete=False,
+        ) as state_file:
+            json.dump(state, state_file)
+            temporary_path = state_file.name
+        os.replace(temporary_path, SESSION_STATE_PATH)
+    except OSError:
+        try:
+            os.unlink(temporary_path)
+        except (OSError, UnboundLocalError):
+            pass
+
+
+def _open_session_circuit(state: Dict[str, Union[int, float, str]]) -> None:
+    """Increase shared backoff after a failed session response."""
+    failure_count = int(state.get("failure_count", 0)) + 1
+    reason = str(state.get("last_reason", "connection-error"))
+    base_delay = SESSION_COOLDOWN_SECONDS.get(reason, 5.0)
+    # A bounded circuit breaker prevents several tasks from immediately repeating
+    # the same failed session handshake.
+    cooldown = min(base_delay * (2 ** min(max(failure_count - 1, 0), 3)), 120.0)
+    state.update({
+        "failure_count": failure_count,
+        "cooldown_until": time.time() + cooldown,
+    })
+    _save_session_circuit_state(state)
+
+
+@contextmanager
+def _single_session_acquisition():
+    """Allow only one worker to acquire a THSR session at a time."""
+    try:
+        import fcntl
+    except ImportError:
+        yield _load_session_circuit_state()
+        return
+
+    try:
+        gate = open(SESSION_GATE_PATH, "a+")
+        fcntl.flock(gate.fileno(), fcntl.LOCK_EX)
+    except OSError:
+        yield _load_session_circuit_state()
+        return
+
+    try:
+        state = _load_session_circuit_state()
+        wait_seconds = float(state.get("cooldown_until", 0.0)) - time.time()
+        if wait_seconds > 0:
+            print(
+                f"Shared session circuit is cooling down for {wait_seconds:.0f}s "
+                f"after {state.get('last_reason') or 'a transient failure'}..."
+            )
+            time.sleep(wait_seconds)
+        yield state
+    finally:
+        fcntl.flock(gate.fileno(), fcntl.LOCK_UN)
+        gate.close()
+
+
+def _establish_booking_session(session: requests.Session) -> Tuple[Optional[requests.Response], Optional[str]]:
+    """Establish a booking session with bounded, server-aware retries."""
+    with _single_session_acquisition() as circuit_state:
+        return _establish_booking_session_exclusive(session, circuit_state)
+
+
+def _establish_booking_session_exclusive(
+    session: requests.Session,
+    circuit_state: Dict[str, Union[int, float, str]],
+) -> Tuple[Optional[requests.Response], Optional[str]]:
+    """Perform the handshake while the cross-process acquisition gate is held."""
+    started_at = time.monotonic()
+    last_reason = "no response"
+    previous_request_at = 0.0
+
+    for attempt in range(1, SESSION_MAX_ATTEMPTS + 1):
+        default_delay = SESSION_RETRY_DELAYS_SECONDS[attempt - 1]
+        if default_delay and time.monotonic() - started_at + default_delay < SESSION_MAX_ELAPSED_SECONDS:
+            print(f"Session retry {attempt}/{SESSION_MAX_ATTEMPTS} in {default_delay:.0f}s...")
+            time.sleep(default_delay)
+
+        try:
+            spacing = SESSION_REQUEST_MIN_SPACING_SECONDS - (time.monotonic() - previous_request_at)
+            if spacing > 0:
+                time.sleep(spacing)
+            previous_request_at = time.monotonic()
+            response = session.get(BOOKING_PAGE_URL, timeout=(10, 20), allow_redirects=True)
+
+            classification, title = _classify_session_response(response)
+            cookie_names = _cookie_names(session.cookies)
+            print(
+                f"Session response {attempt}/{SESSION_MAX_ATTEMPTS}: "
+                f"status={response.status_code}, type={classification}, "
+                f"title={title!r}, cookies={cookie_names}, url={response.url}"
+            )
+
+            jsession = _get_jsession_id(session, response)
+            if response.ok and jsession and classification == "booking-page":
+                circuit_state.update({
+                    "failure_count": 0,
+                    "cooldown_until": 0.0,
+                    "last_reason": "",
+                })
+                _save_session_circuit_state(circuit_state)
+                return response, jsession
+
+            last_reason = f"{classification}, HTTP {response.status_code}"
+            circuit_state["last_reason"] = classification
+            server_delay = _retry_after_seconds(response)
+            if server_delay and attempt < SESSION_MAX_ATTEMPTS:
+                remaining = SESSION_MAX_ELAPSED_SECONDS - (time.monotonic() - started_at)
+                if remaining > 1:
+                    wait_seconds = min(server_delay, remaining)
+                    print(f"Server requested retry after {wait_seconds:.0f}s")
+                    time.sleep(wait_seconds)
+        except requests.exceptions.RequestException as exc:
+            last_reason = f"{type(exc).__name__}: {exc}"
+            circuit_state["last_reason"] = "connection-error"
+            print(f"Session request {attempt}/{SESSION_MAX_ATTEMPTS} failed: {last_reason}")
+
+        if time.monotonic() - started_at >= SESSION_MAX_ELAPSED_SECONDS:
+            break
+
+    _open_session_circuit(circuit_state)
+    return None, last_reason
 
 
 def _get_input(prompt: str, default, choices: Optional[List] = None) -> any:
@@ -223,7 +409,10 @@ def run(args) -> None:
     """Main booking flow with modern interface."""
     _print_header("THSR-Sniper")
     
-    session = requests.Session()
+    # THSR's CDN silently drops generic requests/OpenSSL fingerprints even when
+    # TCP and TLS negotiation succeed. Keep one Chrome-impersonated session for
+    # the complete Wicket flow so the Akamai and JSESSIONID cookies stay intact.
+    session = requests.Session(impersonate="chrome")
     session.headers.update(_headers())
     session.max_redirects = 20
 
@@ -231,30 +420,13 @@ def run(args) -> None:
     _print_section("Step 1: Initializing Booking Session")
     print("Connecting to THSR booking system...")
     
-    try:
-        r = session.get(BOOKING_PAGE_URL, timeout=60)
-        r.raise_for_status()
-        print("✓ Connected successfully")
-    except Exception as e:
-        print(f"✗ Connection failed: {e}")
+    r, jsession_or_reason = _establish_booking_session(session)
+    if r is None:
+        print(f"✗ Error: Cannot establish session after retries ({jsession_or_reason})")
         return
 
-    # Parse JSESSIONID
-    jsession = None
-    for c in session.cookies:
-        if c.name == "JSESSIONID":
-            jsession = c.value
-            break
-    if not jsession:
-        # Fallback try from response cookies
-        for c in r.cookies:
-            if c.name == "JSESSIONID":
-                jsession = c.value
-                break
-    if not jsession:
-        print("✗ Error: Cannot establish session")
-        return
-
+    jsession = jsession_or_reason
+    print("✓ Connected successfully")
     print("✓ Session established")
 
     soup = BeautifulSoup(r.text, "html.parser")

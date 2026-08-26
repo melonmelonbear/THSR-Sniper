@@ -87,6 +87,10 @@ const formatSeatPreference = (seatPreference: number | undefined): string => {
   }
 };
 
+const isReorderableStatus = (status: string): boolean => {
+  return status === 'pending' || status === 'running' || status === 'waiting';
+};
+
 const TasksPage: React.FC = () => {
   const queryClient = useQueryClient();
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
@@ -157,6 +161,20 @@ const TasksPage: React.FC = () => {
     },
   });
 
+  const movePriorityMutation = useMutation(
+    ({ taskId, direction }: { taskId: string; direction: 'up' | 'down' }) =>
+      thsrApi.moveTaskPriority(taskId, direction),
+    {
+      onSuccess: () => {
+        toast.success('任務順位已調整');
+        queryClient.invalidateQueries(['tasks']);
+      },
+      onError: (error: any) => {
+        toast.error(`調整順位失敗：${error.message}`);
+      },
+    }
+  );
+
   const handleCancelTask = (taskId: string) => {
     if (window.confirm('確定要取消這個任務嗎？')) {
       cancelTaskMutation.mutate(taskId);
@@ -168,6 +186,15 @@ const TasksPage: React.FC = () => {
       removeTaskMutation.mutate(taskId);
     }
   };
+
+  const handleMovePriority = (taskId: string, direction: 'up' | 'down') => {
+    movePriorityMutation.mutate({ taskId, direction });
+  };
+
+  const visibleTasks = tasksData?.results || [];
+  const reorderableTaskIds = visibleTasks
+    .filter(task => isReorderableStatus(getEffectiveTaskStatus(task)))
+    .map(task => task.id);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -255,6 +282,9 @@ const TasksPage: React.FC = () => {
         <p className="text-text-muted">
           管理您的訂票任務，查看執行狀態和結果
         </p>
+        <p className="text-text-muted text-sm mt-2">
+          在「全部」檢視中可調整有效排程的執行順位；等待開票的任務不會阻擋後續已開票任務。
+        </p>
       </div>
 
       {/* Status Filter */}
@@ -298,6 +328,9 @@ const TasksPage: React.FC = () => {
           <div className="space-y-4">
             {tasksData.results.map((task) => {
               const effectiveStatus = getEffectiveTaskStatus(task);
+              const reorderIndex = reorderableTaskIds.indexOf(task.id);
+              const canMoveUp = reorderIndex > 0;
+              const canMoveDown = reorderIndex >= 0 && reorderIndex < reorderableTaskIds.length - 1;
               return (
               <div key={task.id} className="border border-gray-700 rounded-lg p-4 hover:border-rog-primary/30 transition-colors">
                 <div className="flex items-start justify-between">
@@ -312,6 +345,11 @@ const TasksPage: React.FC = () => {
                       <span className="text-text-muted text-sm">
                         #{task.id.slice(-8)}
                       </span>
+                      {isReorderableStatus(effectiveStatus) && (
+                        <span className="text-rog-info text-sm">
+                          順位 {task.priority}
+                        </span>
+                      )}
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-3">
@@ -400,6 +438,34 @@ const TasksPage: React.FC = () => {
 
                   {/* Action Buttons */}
                   <div className="flex items-center gap-2 ml-4">
+                    {selectedStatus === 'all' && isReorderableStatus(effectiveStatus) && (
+                      <div className="flex flex-col gap-1" aria-label="調整任務順位">
+                        <button
+                          type="button"
+                          onClick={() => handleMovePriority(task.id, 'up')}
+                          disabled={!canMoveUp || movePriorityMutation.isLoading}
+                          className="p-2 rounded-md border border-gray-600 text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
+                          aria-label="提高任務順位"
+                          title="提高順位"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleMovePriority(task.id, 'down')}
+                          disabled={!canMoveDown || movePriorityMutation.isLoading}
+                          className="p-2 rounded-md border border-gray-600 text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
+                          aria-label="降低任務順位"
+                          title="降低順位"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                      </div>
+                    )}
                     {(effectiveStatus === 'pending' || effectiveStatus === 'running' || effectiveStatus === 'waiting') && (
                       <button
                         onClick={() => handleCancelTask(task.id)}
